@@ -13,11 +13,11 @@ RUN apt update && apt install -y \
     libc-dev \
     musl-dev;
 
-ENV POETRY_VERSION=1.1.4
-RUN curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | POETRY_HOME=/opt/poetry python && \
+ENV POETRY_VERSION=1.4.2
+RUN curl -sSL https://install.python-poetry.org/ | POETRY_HOME=/opt/poetry python && \
     cd /usr/local/bin && \
-    ln -s /opt/poetry/bin/poetry && \
-    poetry config virtualenvs.create false
+    ln -s /opt/poetry/bin/poetry
+RUN poetry config virtualenvs.create false
 
 WORKDIR /app
 COPY poetry.lock* pyproject.toml /app/
