@@ -193,13 +193,13 @@ class WampProto:
     prefix, resource = uri.split(':')
     return ''.join([self._prefixes[prefix], resource])
 
-  def prefix(self, short: str, long: str):
+  async def prefix(self, short: str, long: str):
     long = long.replace('#', '')
     self._prefixes[short] = long
     print(f'Prefixing "{long}" as "{short}"')
 
-  def call(self, call_id: str, uri: str,
-           *args: list[Any]) -> Optional[types.CoroutineType]:
+  async def call(self, call_id: str, uri: str,
+                 *args: list[Any]) -> Optional[types.CoroutineType]:
     resource, method = self._parse_rpc(uri)
     print(f'Got RPC: {resource, method}')
     rpcs = self._rpcs.get(resource, None)
@@ -218,7 +218,7 @@ class WampProto:
     # rpc_task = asyncio.create_task(rpc(*args))
     # self._irpc[rpc_task] = call_id
     result = rpc(*args)
-    return self._socket.send_json([WAMP_MSG_TYPE.CALLRESULT, call_id, result])
+    await self._socket.send_json([WAMP_MSG_TYPE.CALLRESULT, call_id, result])
 
   def _rand_id(self, len) -> str:
     return ''.join(
@@ -247,7 +247,6 @@ class WampProto:
           self._ws_read = asyncio.create_task(self._socket.receive_json())
         done, _ = await asyncio.wait(
             [self._mouse_read, self._ws_read] + self._outgoing,
-            timeout=1.0,
             return_when='FIRST_COMPLETED')
       except asyncio.TimeoutError:
         print('Timed out, trying again...', flush=True)
@@ -271,7 +270,7 @@ class WampProto:
         if task in self._outgoing:
           self._outgoing.remove(task)
 
-  def subscribe(self, target: str):
+  async def subscribe(self, target: str):
     target = self.resolve(target)
     print(f'Subscribed to {target}')
     self._subscriptions.add(target)
@@ -280,18 +279,44 @@ class WampProto:
 
     self._orpc[call_id] = self.view_affine
 
-    return self._socket.send_json([
+    result = await self.read_client(target, 'view.affine')
+    print('GOT RESULT', result)
+
+    result = await self.read_client(target, 'views.front')
+    print('GOT RESULT', result)
+
+    result = await self.read_client(target, 'view.target')
+    print('GOT RESULT', result, flush=True)
+
+  async def read_client(self, target: str, op: str):
+    call_id = self._rand_id(16)
+    # Make the RPC
+    await self._socket.send_json([
         WAMP_MSG_TYPE.EVENT, target,
-        [WAMP_MSG_TYPE.CALL, call_id, 'self:read', 'WAT2', 'view.affine']
+        [WAMP_MSG_TYPE.CALL, call_id, 'self:read', 'spacenav-ws', op]
     ])
+
+    gate = asyncio.Event()
+    rpc = {
+        'gate': gate,
+        'result': None,
+        'error': None,
+    }
+    self._orpc[call_id] = rpc
+    await gate.wait()
+
+    if self._orpc[call_id]['result'] is not None:
+      return rpc['result']
 
   def view_affine(self, affine_mtx: list[int]):
     print(f'Received affine matrix: {affine_mtx}')
 
   def result(self, call_id: str, *result):
-    print(call_id, result)
+    print('IN RES', call_id, result)
     assert call_id in self._orpc
-    self._orpc[call_id](*result)
+    rpc = self._orpc[call_id]
+    rpc['result'] = result
+    rpc['gate'].set()
 
   def registerRPC(self, resource: str, method: str, handler):
     resource_rpcs = self._rpcs.setdefault(resource, {})
