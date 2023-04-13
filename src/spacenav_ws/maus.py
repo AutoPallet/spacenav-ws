@@ -44,7 +44,7 @@ class Mouse:
     self._controller_name = 'controller0'
     print(
         f'"Creating" controller "{self._controller_name}" '
-        f'for mosue "{mouse_id}", for client {name}, '
+        f'for mouse "{mouse_id}", for client {name}, '
         f'version {version}',
         flush=True)
     return {'instance': self._controller_name}
