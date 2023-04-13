@@ -6,8 +6,11 @@ import pathlib
 import fastapi
 from fastapi import templating
 from fastapi.middleware import cors
+from spacenav_ws import maus
 from spacenav_ws import wamp
 import uvicorn
+
+logging.basicConfig(level=logging.INFO)
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -43,6 +46,10 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
 
   print('Accepting', flush=True)
   session = wamp.WampSession(websocket)
+
+  mouse = maus.Mouse(session)
+
+  logging.info('TESTER')
 
   await session.begin()
   while True:

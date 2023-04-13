@@ -138,8 +138,11 @@ class WampSession:
     self._prefixes = {}
 
     self._msg_handlers = {
-        WAMP_MSG_TYPE.PREFIX: self.prefix,
+        WAMP_MSG_TYPE.PREFIX: self.add_prefix,
+        WAMP_MSG_TYPE.CALL: self.call
     }
+
+    self._call_handlers = {}
 
   async def begin(self):
     await self._socket.accept(subprotocol="wamp")
@@ -156,6 +159,12 @@ class WampSession:
       raise ValueError(f'Unknown message type: {msg_id}')
     return ctor(*args)
 
+  def resolve(self, uri: str) -> str:
+    if ':' not in uri:
+      return uri
+    prefix, resource = uri.split(':')
+    return ''.join([self._prefixes[prefix], resource])
+
   async def send_message(self, message: WampMessage):
     serialized = [message.ID] + message.serialize()
     await self._socket.send_json(serialized)
@@ -169,5 +178,29 @@ class WampSession:
       return
     await handler(msg)
 
-  async def prefix(self, msg: Prefix):
+  async def add_prefix(self, msg: Prefix):
     self._prefixes[msg.prefix] = msg.uri
+
+  def on(self, call: str, handler: Any):
+    print(f'SETTING HANDLER {call}')
+    self._call_handlers[call] = handler
+
+  async def call(self, msg: Call):
+    rpc_name = self.resolve(msg.proc_uri)
+    print(msg.proc_uri, rpc_name, flush=True)
+
+    rpc = self._call_handlers.get(rpc_name, None)
+
+    if rpc is None:
+      logging.warn('Unhandled RPC: %s (received as %s)', rpc_name, msg.proc_uri)
+      print(f'Unhandled RPC: {rpc_name}')
+      await self.send_message(
+          CallError(msg.call_id, 'Err', f'Unhandled RPC: {msg.proc_uri}'))
+      return
+
+    # try:
+    print(msg.args, flush=True)
+    result = await rpc(*msg.args)
+    await self.send_message(CallResult(msg.call_id, result))
+    # except:
+    #   await self.send_message(CallError(msg.call_id, 'Err', 'HERE'))
