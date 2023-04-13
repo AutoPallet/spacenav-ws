@@ -47,9 +47,7 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
   print('Accepting', flush=True)
   session = wamp.WampSession(websocket)
 
-  mouse = maus.Mouse(session)
-
-  logging.info('TESTER')
+  mouse = maus.MouseSession(session)
 
   await session.begin()
   while True:

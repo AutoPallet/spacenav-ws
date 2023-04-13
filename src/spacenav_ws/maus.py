@@ -11,13 +11,26 @@ def _resource(name: str) -> str:
   return f'wss://127.51.68.120/3dconnexion{name}'
 
 
-class Mouse:
+class Mouse3d:
+
+  def __init__(self):
+    self.name = 'mouse0'
+
+
+class Controller:
+
+  def __init__(self, mouse: Mouse3d):
+    self.name = 'controller0'
+    self.mouse = mouse
+
+
+class MouseSession:
 
   def __init__(self, session: wamp.WampSession):
     self._com = session
 
-    self._mouse_name = None
-    self._controller_name = None
+    self._mouse = None
+    self._controller = None
 
     session.on(_rpc('create'), self.create)
 
@@ -32,19 +45,19 @@ class Mouse:
       return self.create_controller(args[0], **args[1])
 
   def create_mouse(self, version: str) -> dict[str:str]:
-    self._mouse_name = 'mouse0'
+    self._mouse = Mouse3d()
     print(
-        f'"Creating" 3d mouse "{self._mouse_name}" '
+        f'"Creating" 3d mouse "{self._mouse.name}" '
         f'for client verssion {version}',
         flush=True)
-    return {'connexion': self._mouse_name}
+    return {'connexion': self._mouse.name}
 
   def create_controller(self, mouse_id: str, version: int,
                         name: str) -> dict[str:str]:
-    self._controller_name = 'controller0'
+    self._controller = Controller(self._mouse)
     print(
-        f'"Creating" controller "{self._controller_name}" '
+        f'"Creating" controller "{self._controller.name}" '
         f'for mouse "{mouse_id}", for client {name}, '
         f'version {version}',
         flush=True)
-    return {'instance': self._controller_name}
+    return {'instance': self._controller.name}
