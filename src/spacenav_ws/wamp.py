@@ -139,10 +139,13 @@ class WampSession:
 
     self._msg_handlers = {
         WAMP_MSG_TYPE.PREFIX: self.add_prefix,
-        WAMP_MSG_TYPE.CALL: self.call
+        WAMP_MSG_TYPE.CALL: self.call,
+        WAMP_MSG_TYPE.SUBSCRIBE: self.subscribe,
     }
 
     self._call_handlers = {}
+
+    self._subscribables = {}
 
   async def begin(self):
     await self._socket.accept(subprotocol="wamp")
@@ -204,3 +207,15 @@ class WampSession:
     await self.send_message(CallResult(msg.call_id, result))
     # except:
     #   await self.send_message(CallError(msg.call_id, 'Err', 'HERE'))
+
+  def add_subscribable(self, topic_uri: str, async_fn: Any):
+    print(f'Adding subscribable: {topic_uri}')
+    self._subscribables[topic_uri] = async_fn
+
+  async def subscribe(self, msg: Subscribe):
+    resource = self.resolve(msg.topic_uri)
+    handler = self._subscribables.get(resource, None)
+    if handler is None:
+      logging.warn('Unknown subscribable: %s', resource)
+      return
+    await handler(resource)

@@ -49,9 +49,7 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
 
   mouse = maus.MouseSession(session)
 
-  await session.begin()
-  while True:
-    await session.process_message()
+  await mouse.process()
 
 
 if __name__ == "__main__":
