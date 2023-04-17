@@ -42,9 +42,7 @@ async def nlproxy(request):
 @app.websocket("/")
 @app.websocket("/3dconnexion")
 async def websocket_endpoint(websocket: fastapi.WebSocket):
-  # reader, __ = await asyncio.open_unix_connection("/var/run/spnav.sock")
-
-  print('Accepting', flush=True)
+  logging.info('Accepting 3dmosue connection')
   session = wamp.WampSession(websocket)
 
   mouse = maus.MouseSession(session)
@@ -58,5 +56,5 @@ if __name__ == "__main__":
       host="0.0.0.0",
       port=8000,
       reload=True,
-      log_level="debug",
+      log_level="warning",
   )

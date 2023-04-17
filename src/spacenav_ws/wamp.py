@@ -26,8 +26,10 @@ class WampMessage(abc.ABC):
   ID: WAMP_MSG_TYPE
 
   def serialize(self) -> list[Any]:
-    # aspdifjasoidj
     pass
+
+  def serialize_with_id(self) -> list[Any]:
+    return [self.ID] + self.serialize()
 
 
 @dataclasses.dataclass
@@ -66,7 +68,11 @@ class Call(WampMessage):
     self.args = args
 
   def serialize(self):
-    return [self.call_id, self.proc_uri, *args]
+    return [self.call_id, self.proc_uri, *self.args]
+
+  @classmethod
+  def new(cls, proc_uri: str, *args, call_id_len=18) -> 'Call':
+    return Call(_rand_id(call_id_len), proc_uri, *args)
 
 
 @dataclasses.dataclass
@@ -107,10 +113,14 @@ class Event(WampMessage):
   ID = WAMP_MSG_TYPE.EVENT
 
   topic_uri: str
-  event: Any
+  args: Any
+
+  def __init__(self, topic_uri: str, *args):
+    self.topic_uri = topic_uri
+    self.args = args
 
   def serialize(self):
-    return [self.topic_uri, self.event]
+    return [self.topic_uri, *self.args]
 
 
 WAMP_TYPES = {
@@ -140,12 +150,11 @@ class WampSession:
     self._msg_handlers = {
         WAMP_MSG_TYPE.PREFIX: self.add_prefix,
         WAMP_MSG_TYPE.CALL: self.call,
+        WAMP_MSG_TYPE.CALLRESULT: self.callresult,
         WAMP_MSG_TYPE.SUBSCRIBE: self.subscribe,
     }
 
     self._call_handlers = {}
-
-    self._subscribables = {}
 
   async def begin(self):
     await self._socket.accept(subprotocol="wamp")
@@ -169,12 +178,10 @@ class WampSession:
     return ''.join([self._prefixes[prefix], resource])
 
   async def send_message(self, message: WampMessage):
-    serialized = [message.ID] + message.serialize()
-    await self._socket.send_json(serialized)
+    await self._socket.send_json(message.serialize_with_id())
 
   async def process_message(self):
     msg = self.parse_message(await self._socket.receive_json())
-    print(msg, flush=True)
     handler = self._msg_handlers.get(msg.ID, None)
     if handler is None:
       logging.warn('Unhandled message type: %s', msg.ID)
@@ -184,33 +191,25 @@ class WampSession:
   async def add_prefix(self, msg: Prefix):
     self._prefixes[msg.prefix] = msg.uri
 
-  def on(self, call: str, handler: Any):
-    print(f'SETTING HANDLER {call}')
+  def on(self, call: WAMP_MSG_TYPE, handler: Any):
     self._call_handlers[call] = handler
 
   async def call(self, msg: Call):
     rpc_name = self.resolve(msg.proc_uri)
-    print(msg.proc_uri, rpc_name, flush=True)
 
     rpc = self._call_handlers.get(rpc_name, None)
 
     if rpc is None:
       logging.warn('Unhandled RPC: %s (received as %s)', rpc_name, msg.proc_uri)
-      print(f'Unhandled RPC: {rpc_name}')
       await self.send_message(
           CallError(msg.call_id, 'Err', f'Unhandled RPC: {msg.proc_uri}'))
       return
 
     # try:
-    print(msg.args, flush=True)
     result = await rpc(*msg.args)
     await self.send_message(CallResult(msg.call_id, result))
     # except:
     #   await self.send_message(CallError(msg.call_id, 'Err', 'HERE'))
-
-  def add_subscribable(self, topic_uri: str, async_fn: Any):
-    print(f'Adding subscribable: {topic_uri}')
-    self._subscribables[topic_uri] = async_fn
 
   async def subscribe(self, msg: Subscribe):
     resource = self.resolve(msg.topic_uri)
@@ -219,3 +218,24 @@ class WampSession:
       logging.warn('Unknown subscribable: %s', resource)
       return
     await handler(resource)
+
+  async def send_event(self, msg: Event, expect_reply=True):
+    print(f'Sending event: {msg}', flush=True)
+    await self.send_message(msg)
+
+  async def callresult(self, msg: CallResult):
+    handler = self._call_handlers.get(WAMP_MSG_TYPE.CALLRESULT, None)
+    if handler is None:
+      logging.warn('No callresult handler for msg: %s', msg)
+      return
+    args = msg.result
+    if msg.result is None:
+      args = [None]
+    await handler(msg.call_id, *args)
+
+  async def subscribe(self, msg: Subscribe):
+    handler = self._call_handlers.get(WAMP_MSG_TYPE.SUBSCRIBE, None)
+    if handler is None:
+      logging.warn('No subscribe handler for msg: %s', msg)
+      return
+    await handler(msg.topic_uri)

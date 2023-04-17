@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import struct
 from typing import Any
 
@@ -34,7 +35,7 @@ class Controller:
 
   @property
   def uri(self) -> str:
-    return f'3dcontroller/{self.name}'
+    return _resource(f'3dcontroller/{self.name}')
 
   async def update(self):
     mouse_event = await self._reader.read(32)
@@ -50,11 +51,20 @@ class MouseSession:
     self._mouse = None
     self._controller = None
 
+    self._rpcs = {}
+    self._ws_reads = []
+    self._mouse_reads = []
+    self._rpc_reads = []
+
     session.on(_rpc('create'), self.create)
+    session.on(_rpc('update'), self.client_update)
+
+    self._com.on(wamp.WAMP_MSG_TYPE.SUBSCRIBE, self.subscription)
+    self._com.on(wamp.WAMP_MSG_TYPE.CALLRESULT, self.rpc_finished)
 
   async def create(self, resource_uri: str, *args: list[Any]):
     resource_uri = self._com.resolve(resource_uri)
-    print(f'Creating {resource_uri}', flush=True)
+    logging.info(f'Creating {resource_uri}')
 
     obj = resource_uri.split(':')[1]
     if obj.endswith('3dmouse'):
@@ -64,52 +74,102 @@ class MouseSession:
 
   def create_mouse(self, version: str) -> dict[str:str]:
     self._mouse = Mouse3d()
-    print(
-        f'"Creating" 3d mouse "{self._mouse.name}" '
-        f'for client verssion {version}',
-        flush=True)
+    logging.info(f'"Creating" 3d mouse "{self._mouse.name}" '
+                 f'for client verssion {version}')
     return {'connexion': self._mouse.name}
 
   async def create_controller(self, mouse_id: str, version: int,
                               name: str) -> dict[str:str]:
     controller = Controller(self._mouse)
-    print(
-        f'Created controller "{controller.name}" '
-        f'for mouse "{mouse_id}", for client {name}, '
-        f'version {version}',
-        flush=True)
+    logging.info(f'Created controller "{controller.name}" '
+                 f'for mouse "{mouse_id}", for client {name}, '
+                 f'version {version}')
 
-    print(
-        'Connected. Attempting to connect to mouse at '
-        f'{controller.socket_path}...',
-        flush=True)
+    logging.info('Connected. Attempting to connect to mouse at '
+                 f'{controller.socket_path}...')
     await controller.connect()
 
-    self._com.add_subscribable(_resource(controller.uri), self.on_subscription)
-
     self._controller = controller
+    self._expect_mouse()
     return {'instance': self._controller.name}
 
-  async def on_subscription(self, resource_uri: str):
-    print(f'Registering subscription to: {resource_uri}', flush=True)
+  async def subscription(self, resource_uri: str):
+    logging.info(f'Registering subscription to: {resource_uri}')
+    # TODO(blakely): This may not be the right place for this...
+
+    await self.update_client('hit.selectionOnly', False)
+
+  async def update_client(self, property: str, value: Any):
+    event = wamp.Event(self._controller.uri,
+                       wamp.Call.new('self:update', '', property, value))
+
+  def _expect_message(self):
+    self._ws_reads.append(asyncio.create_task(self._com.process_message()))
+
+  def _expect_rpc(self):
+    self._rpc_reads.append(asyncio.create_task(self._com.process_message()))
+
+  def _expect_mouse(self):
+    self._mouse_reads.append(asyncio.create_task(self._controller.update()))
 
   async def process(self):
     await self._com.begin()
 
-    client_message = asyncio.create_task(self._com.process_message())
-    mouse_event = None
+    self._expect_message()
 
     while True:
-      if mouse_event is None and self._controller is not None:
-        mouse_event = asyncio.create_task(self._controller.update())
+      if not self._ws_reads:
+        self._expect_message()
+
       done, _ = await asyncio.wait(
-          [x for x in [client_message, mouse_event] if x is not None],
+          self._ws_reads + self._mouse_reads + self._rpc_reads,
           timeout=1,
           return_when='FIRST_COMPLETED')
-      if client_message in done:
-        # Retrieve result
-        client_message.result()
-        client_message = asyncio.create_task(self._com.process_message())
-      if mouse_event in done:
-        print(f'Got mouse update: {mouse_event.result()}', flush=True)
-        mouse_event = asyncio.create_task(self._controller.update())
+      for done_task in done:
+        result = done_task.result()
+        if done_task in self._mouse_reads:
+          motion = result
+          logging.info(f'Got mouse update: {motion}')
+          self._mouse_reads.remove(done_task)
+          self._expect_mouse()
+        elif done_task in self._rpc_reads:
+          self._rpc_reads.remove(done_task)
+        else:
+          self._ws_reads.remove(done_task)
+          self._expect_message()
+
+  async def client_update(self, controller_id: str, args: dict[str, Any]):
+    logging.info(f'Got update for {controller_id}: {args}')
+
+  async def rpc_finished(self, call_id: str, *args):
+    rpc = self._rpcs.get(call_id, None)
+    if rpc is None:
+      logging.error('Got unexpected result for unknown RPC id %s: %s', call_id,
+                    args)
+      return
+    rpc['result'] = args
+    rpc['gate'].set()
+
+  async def update_client(self, *args):
+    # Set up the call
+    call = wamp.Call.new('self:update', '', *args)
+    # Launch RPC in background as task.
+    await self._com.send_event(
+        wamp.Event(self._controller.uri, call.serialize_with_id()))
+
+    gate = asyncio.Event()
+    rpc = {
+        'gate': gate,
+        'result': None,
+        'error': None,
+    }
+    self._rpcs[call.call_id] = rpc
+
+    self._expect_rpc()
+    await gate.wait()
+
+    if rpc['error'] is not None:
+      # TODO(blakely): Should be something else other than valueerror
+      raise ValueError(rpc['error'])
+
+    return rpc['result']
