@@ -151,6 +151,7 @@ class WampSession:
         WAMP_MSG_TYPE.PREFIX: self.add_prefix,
         WAMP_MSG_TYPE.CALL: self.call,
         WAMP_MSG_TYPE.CALLRESULT: self.callresult,
+        WAMP_MSG_TYPE.CALLERROR: self.callerror,
         WAMP_MSG_TYPE.SUBSCRIBE: self.subscribe,
     }
 
@@ -227,7 +228,20 @@ class WampSession:
     args = msg.result
     if msg.result is None:
       args = [None]
-    await handler(msg.call_id, *args)
+
+    try:
+      await handler(msg.call_id, *args)
+    except TypeError:
+      # Caused when the response is not multiple args e.g. a bool
+      await handler(msg.call_id, args)
+
+  async def callerror(self, msg: CallError):
+    handler = self._call_handlers.get(WAMP_MSG_TYPE.CALLRESULT, None)
+    if handler is None:
+      logging.warn('No callerror handler for msg: %s', msg)
+      return
+
+    await handler(msg.call_id, msg.error_uri, msg.error_desc)
 
   async def subscribe(self, msg: Subscribe):
     handler = self._call_handlers.get(WAMP_MSG_TYPE.SUBSCRIBE, None)

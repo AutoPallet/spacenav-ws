@@ -1,7 +1,8 @@
 import asyncio
+import dataclasses
 import logging
 import struct
-from typing import Any
+from typing import Any, Coroutine
 
 import numpy as np
 from spacenav_ws import event
@@ -25,6 +26,28 @@ class Mouse3d:
 
 class Controller:
 
+  @dataclasses.dataclass
+  class PredefinedViews:
+    front: np.ndarray
+
+  @dataclasses.dataclass
+  class World:
+    coordinate_frame: np.ndarray
+
+  @dataclasses.dataclass
+  class Camera:
+    affine: np.ndarray = dataclasses.field()
+    constructionPlane: np.ndarray
+    extents: np.ndarray
+    # fov: np.ndarray
+    frustum: np.ndarray
+    perspective: bool
+    target: np.ndarray
+    rotatable: np.ndarray
+
+    def __post_init__(self):
+      self.affine = np.asarray(self.affine).reshape([4, 4])
+
   def __init__(self, mouse: Mouse3d, spnav_socket='/var/run/spnav.sock'):
     self.name = 'controller0'
     self.mouse = mouse
@@ -47,12 +70,48 @@ class Controller:
     return message
 
   async def reset(self, sess: 'MouseSession'):
-    logging.info('Setting HS')
     await sess.write('hit.selectionOnly', False)
-    logging.info('Getting affine')
-    affine = await sess.read('view.affine')
-    self.affine = np.array(affine)
-    logging.info(f'Affine: {self.affine}')
+
+    self.world = Controller.World(
+        np.array(await (sess.read('coordinateSystem'))))
+
+    self.predefined_views = Controller.PredefinedViews(
+        np.array(await (sess.read('views.front'))))
+
+    view_attribs = [
+        'affine',
+        'constructionPlane',
+        'extents',
+        # 'fov',
+        'frustum',
+        'perspective',
+        'target',
+        'rotatable',
+    ]
+
+    camera = {}
+    for attribute in view_attribs:
+      logging.info('Reading client view.%s', attribute)
+      result = await sess.read(f'view.{attribute}')
+      camera[attribute] = result
+    logging.info('Creating camera')
+    self.camera = Controller.Camera(**camera)
+
+    await sess.write('hit.selectionOnly', False)
+
+  async def motion(self, event: event.MotionEvent, sess: 'MouseSession'):
+    logging.info('Motion: %s', event)
+    await sess.write('motion', True)
+    translation_mtx = np.eye(4)
+    # translation_mtx[3, :3] = np.array([event.x, event.y, event.z]) * 0.001
+    translation_mtx[:3, 3] = np.array([-event.x, event.y, event.z],
+                                      dtype=np.float32) * 0.001
+    self.camera.affine = self.camera.affine @ translation_mtx
+    logging.info('MTX: %s vs %s', self.camera.affine, translation_mtx)
+    logging.info('R: %s', self.camera.affine.ravel())
+
+    return await sess.write('view.affine',
+                            self.camera.affine.T.ravel().tolist())
 
 
 class MouseSession:
@@ -73,6 +132,7 @@ class MouseSession:
 
     self._com.on(wamp.WAMP_MSG_TYPE.SUBSCRIBE, self.subscription)
     self._com.on(wamp.WAMP_MSG_TYPE.CALLRESULT, self.rpc_finished)
+    self._com.on(wamp.WAMP_MSG_TYPE.CALLERROR, self.rpc_error)
 
   async def create(self, resource_uri: str, *args: list[Any]):
     resource_uri = self._com.resolve(resource_uri)
@@ -144,12 +204,20 @@ class MouseSession:
       if done_task in self._mouse_reads:
         motion = done_task.result()
         logging.info(f'Got mouse update: {motion}')
+        if self._controller:
+          if isinstance(motion, event.MotionEvent):
+            update_coroutine = self._controller.motion(motion, self)
+            if update_coroutine:
+              logging.info('UCR: %s', update_coroutine)
+              self._pending_handlers.append(
+                  asyncio.create_task(update_coroutine, name='motion'))
         self._mouse_reads.remove(done_task)
         self._expect_mouse()
         continue
       pending_call = done_task.result()
-      if pending_call:
-        self._pending_handlers.append(asyncio.create_task(pending_call))
+      if isinstance(pending_call, Coroutine):
+        logging.info('PC: %s', pending_call)
+        self._pending_handlers.append(asyncio.create_task(pending_call,))
       if done_task in self._pending_handlers:
         self._pending_handlers.remove(done_task)
       elif done_task in self._ws_reads:
@@ -170,6 +238,15 @@ class MouseSession:
                     args)
       return
     rpc['result'] = args
+    rpc['gate'].set()
+
+  async def rpc_error(self, call_id: str, error_uri: str, error_desc: str):
+    rpc = self._rpcs.get(call_id, None)
+    if rpc is None:
+      logging.error('Got unexpected error for unknown RPC id %s: %s -> %s',
+                    call_id, error_uri, error_desc)
+      return
+    rpc['error'] = (error_uri, error_desc)
     rpc['gate'].set()
 
   async def write(self, *args):
