@@ -3,6 +3,7 @@ import logging
 import struct
 from typing import Any
 
+import numpy as np
 from spacenav_ws import event
 from spacenav_ws import wamp
 
@@ -30,6 +31,9 @@ class Controller:
     self.socket_path = spnav_socket
     self._reader = None
 
+    self.affine = None
+    self.coordinate_system = None
+
   async def connect(self):
     self._reader, __ = await asyncio.open_unix_connection(self.socket_path)
 
@@ -41,6 +45,14 @@ class Controller:
     mouse_event = await self._reader.read(32)
     message = event.from_message(struct.unpack("iiiiiiii", mouse_event))
     return message
+
+  async def reset(self, sess: 'MouseSession'):
+    logging.info('Setting HS')
+    await sess.write('hit.selectionOnly', False)
+    logging.info('Getting affine')
+    affine = await sess.read('view.affine')
+    self.affine = np.array(affine)
+    logging.info(f'Affine: {self.affine}')
 
 
 class MouseSession:
@@ -95,51 +107,81 @@ class MouseSession:
 
   async def subscription(self, resource_uri: str):
     logging.info(f'Registering subscription to: {resource_uri}')
-    # TODO(blakely): This may not be the right place for this...
+    self.log('here')
+    await self._controller.reset(self)
+    self.log('there')
 
-    await self.update_client('hit.selectionOnly', False)
-
-  async def update_client(self, property: str, value: Any):
+  async def write_client(self, property: str, value: Any):
     event = wamp.Event(self._controller.uri,
                        wamp.Call.new('self:update', '', property, value))
 
-  def _expect_message(self):
-    self._ws_reads.append(asyncio.create_task(self._com.process_message()))
+  def _expect_message(self, name):
+    logging.info('Creating message expectation')
+    self._ws_reads.append(
+        asyncio.create_task(self._com.process_message(), name=name))
 
-  def _expect_rpc(self):
-    self._rpc_reads.append(asyncio.create_task(self._com.process_message()))
+  def _expect_rpc(self, name):
+    logging.info('Creating RPC expectation')
+    self._rpc_reads.append(
+        asyncio.create_task(self._com.process_message(), name=name))
 
   def _expect_mouse(self):
-    self._mouse_reads.append(asyncio.create_task(self._controller.update()))
+    self._mouse_reads.append(
+        asyncio.create_task(self._controller.update(), name='Mouse'))
+
+  async def begin(self):
+    await self._com.begin()
+    self._expect_message('begin')
+
+  @property
+  def reads(self):
+    return self._ws_reads + self._mouse_reads + self._rpc_reads
+
+  def log(self, msg=None):
+    if msg is None:
+      msg = ''
+    logging.info(f'Reads {msg}: {len(self.reads)} ('
+                 f'{len(self._ws_reads)}/'
+                 f'{len(self._mouse_reads)}/'
+                 f'{len(self._rpc_reads)})')
 
   async def process(self):
-    await self._com.begin()
+    # self.log('Process')
+    if not self._ws_reads:
+      logging.info('WAIT')
+    done, _ = await asyncio.wait(
+        self.reads, timeout=1, return_when='FIRST_COMPLETED')
+    logging.info(f'Done: {len(done)} ({len(_)}, {[x.get_name() for x in _]})')
+    for done_task in done:
+      logging.info(f'Retrieving result from {done_task}')
+      if done_task in self._mouse_reads:
+        logging.info(f'Mouse read task: {done_task}')
+        motion = done_task.result()
+        logging.info(f'Got mouse update: {motion}')
+        self._mouse_reads.remove(done_task)
+        self._expect_mouse()
+        continue
+      logging.info('Done task result: Start')
+      _ = done_task.result()
+      logging.info('Done task result: Finish')
+      if done_task in self._rpc_reads:
+        logging.info(f'RPC done: {done_task}')
+        self._rpc_reads.remove(done_task)
+      elif done_task in self._ws_reads:
+        logging.info(f'WS read done task: {done_task}')
+        self._ws_reads.remove(done_task)
+        self._expect_message('ws_done')
+      else:
+        logging.error('TASK NOT DONE')
 
-    self._expect_message()
-
-    while True:
-      if not self._ws_reads:
-        self._expect_message()
-
-      done, _ = await asyncio.wait(
-          self._ws_reads + self._mouse_reads + self._rpc_reads,
-          timeout=1,
-          return_when='FIRST_COMPLETED')
-      for done_task in done:
-        result = done_task.result()
-        if done_task in self._mouse_reads:
-          motion = result
-          logging.info(f'Got mouse update: {motion}')
-          self._mouse_reads.remove(done_task)
-          self._expect_mouse()
-        elif done_task in self._rpc_reads:
-          self._rpc_reads.remove(done_task)
-        else:
-          self._ws_reads.remove(done_task)
-          self._expect_message()
+  async def shutdown(self):
+    for t in self.reads:
+      t.cancel()
 
   async def client_update(self, controller_id: str, args: dict[str, Any]):
     logging.info(f'Got update for {controller_id}: {args}')
+    import traceback
+    traceback.print_stack()
 
   async def rpc_finished(self, call_id: str, *args):
     rpc = self._rpcs.get(call_id, None)
@@ -150,9 +192,15 @@ class MouseSession:
     rpc['result'] = args
     rpc['gate'].set()
 
-  async def update_client(self, *args):
+  async def write(self, *args):
+    return await self._client_rpc('self:update', *args)
+
+  async def read(self, *args):
+    return await self._client_rpc('self:read', *args)
+
+  async def _client_rpc(self, method: str, *args):
     # Set up the call
-    call = wamp.Call.new('self:update', '', *args)
+    call = wamp.Call.new(method, '', *args)
     # Launch RPC in background as task.
     await self._com.send_event(
         wamp.Event(self._controller.uri, call.serialize_with_id()))
@@ -165,8 +213,12 @@ class MouseSession:
     }
     self._rpcs[call.call_id] = rpc
 
-    self._expect_rpc()
+    self._expect_rpc(method)
+    logging.info(f'Awaiting gate for {method}')
+    import traceback
+    traceback.print_stack()
     await gate.wait()
+    logging.info(f'Gate done for {method}')
 
     if rpc['error'] is not None:
       # TODO(blakely): Should be something else other than valueerror

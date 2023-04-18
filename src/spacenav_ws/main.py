@@ -39,6 +39,9 @@ async def nlproxy(request):
   return fastapi.responses.JSONResponse({"port": "8181"})
 
 
+RUNNING = True
+
+
 @app.websocket("/")
 @app.websocket("/3dconnexion")
 async def websocket_endpoint(websocket: fastapi.WebSocket):
@@ -46,8 +49,27 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
   session = wamp.WampSession(websocket)
 
   mouse = maus.MouseSession(session)
+  await mouse.begin()
+  while RUNNING:
+    await mouse.process()
 
-  await mouse.process()
+  await mouse.shutdown()
+
+
+@app.on_event("shutdown")
+def shutdown():
+  logging.info('SIG SHUTDOWN')
+  global RUNNING
+  RUNNING = False
+  logging.info(f'   RUNNING: {RUNNING}')
+
+
+@app.on_event("startup")
+def shutdown():
+  logging.info('SIG: STARTUP')
+  global RUNNING
+  RUNNING = True
+  logging.info(f'    RUNNING: {RUNNING}')
 
 
 if __name__ == "__main__":
@@ -56,5 +78,5 @@ if __name__ == "__main__":
       host="0.0.0.0",
       port=8000,
       reload=True,
-      log_level="warning",
+      log_level="debug",
   )
