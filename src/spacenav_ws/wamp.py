@@ -181,15 +181,12 @@ class WampSession:
     await self._socket.send_json(message.serialize_with_id())
 
   async def process_message(self):
-    logging.info('Starting to process message')
     msg = self.parse_message(await self._socket.receive_json())
     handler = self._msg_handlers.get(msg.ID, None)
     if handler is None:
       logging.warn('Unhandled message type: %s', msg.ID)
       return
-    logging.info(f'Processing message: {msg}')
-    await handler(msg)
-    logging.info('ProcessMessage done')
+    return handler(msg)
 
   async def add_prefix(self, msg: Prefix):
     self._prefixes[msg.prefix] = msg.uri
@@ -208,12 +205,8 @@ class WampSession:
           CallError(msg.call_id, 'Err', f'Unhandled RPC: {msg.proc_uri}'))
       return
 
-    # try:
     result = await rpc(*msg.args)
     await self.send_message(CallResult(msg.call_id, result))
-    logging.info('Call done')
-    # except:
-    #   await self.send_message(CallError(msg.call_id, 'Err', 'HERE'))
 
   async def subscribe(self, msg: Subscribe):
     resource = self.resolve(msg.topic_uri)
@@ -235,7 +228,6 @@ class WampSession:
     if msg.result is None:
       args = [None]
     await handler(msg.call_id, *args)
-    logging.info('CallResult done')
 
   async def subscribe(self, msg: Subscribe):
     handler = self._call_handlers.get(WAMP_MSG_TYPE.SUBSCRIBE, None)

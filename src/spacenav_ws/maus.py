@@ -66,7 +66,7 @@ class MouseSession:
     self._rpcs = {}
     self._ws_reads = []
     self._mouse_reads = []
-    self._rpc_reads = []
+    self._pending_handlers = []
 
     session.on(_rpc('create'), self.create)
     session.on(_rpc('update'), self.client_update)
@@ -107,22 +107,14 @@ class MouseSession:
 
   async def subscription(self, resource_uri: str):
     logging.info(f'Registering subscription to: {resource_uri}')
-    self.log('here')
     await self._controller.reset(self)
-    self.log('there')
 
   async def write_client(self, property: str, value: Any):
     event = wamp.Event(self._controller.uri,
                        wamp.Call.new('self:update', '', property, value))
 
   def _expect_message(self, name):
-    logging.info('Creating message expectation')
     self._ws_reads.append(
-        asyncio.create_task(self._com.process_message(), name=name))
-
-  def _expect_rpc(self, name):
-    logging.info('Creating RPC expectation')
-    self._rpc_reads.append(
         asyncio.create_task(self._com.process_message(), name=name))
 
   def _expect_mouse(self):
@@ -135,7 +127,7 @@ class MouseSession:
 
   @property
   def reads(self):
-    return self._ws_reads + self._mouse_reads + self._rpc_reads
+    return self._ws_reads + self._mouse_reads + self._pending_handlers
 
   def log(self, msg=None):
     if msg is None:
@@ -143,36 +135,26 @@ class MouseSession:
     logging.info(f'Reads {msg}: {len(self.reads)} ('
                  f'{len(self._ws_reads)}/'
                  f'{len(self._mouse_reads)}/'
-                 f'{len(self._rpc_reads)})')
+                 f'{len(self._pending_handlers)})')
 
   async def process(self):
-    # self.log('Process')
-    if not self._ws_reads:
-      logging.info('WAIT')
     done, _ = await asyncio.wait(
         self.reads, timeout=1, return_when='FIRST_COMPLETED')
-    logging.info(f'Done: {len(done)} ({len(_)}, {[x.get_name() for x in _]})')
     for done_task in done:
-      logging.info(f'Retrieving result from {done_task}')
       if done_task in self._mouse_reads:
-        logging.info(f'Mouse read task: {done_task}')
         motion = done_task.result()
         logging.info(f'Got mouse update: {motion}')
         self._mouse_reads.remove(done_task)
         self._expect_mouse()
         continue
-      logging.info('Done task result: Start')
-      _ = done_task.result()
-      logging.info('Done task result: Finish')
-      if done_task in self._rpc_reads:
-        logging.info(f'RPC done: {done_task}')
-        self._rpc_reads.remove(done_task)
+      pending_call = done_task.result()
+      if pending_call:
+        self._pending_handlers.append(asyncio.create_task(pending_call))
+      if done_task in self._pending_handlers:
+        self._pending_handlers.remove(done_task)
       elif done_task in self._ws_reads:
-        logging.info(f'WS read done task: {done_task}')
+        self._expect_message('unified EM')
         self._ws_reads.remove(done_task)
-        self._expect_message('ws_done')
-      else:
-        logging.error('TASK NOT DONE')
 
   async def shutdown(self):
     for t in self.reads:
@@ -180,8 +162,6 @@ class MouseSession:
 
   async def client_update(self, controller_id: str, args: dict[str, Any]):
     logging.info(f'Got update for {controller_id}: {args}')
-    import traceback
-    traceback.print_stack()
 
   async def rpc_finished(self, call_id: str, *args):
     rpc = self._rpcs.get(call_id, None)
@@ -213,12 +193,7 @@ class MouseSession:
     }
     self._rpcs[call.call_id] = rpc
 
-    self._expect_rpc(method)
-    logging.info(f'Awaiting gate for {method}')
-    import traceback
-    traceback.print_stack()
     await gate.wait()
-    logging.info(f'Gate done for {method}')
 
     if rpc['error'] is not None:
       # TODO(blakely): Should be something else other than valueerror
