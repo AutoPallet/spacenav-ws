@@ -5,6 +5,7 @@ import struct
 from typing import Any, Coroutine
 
 import numpy as np
+from scipy.spatial import transform
 from spacenav_ws import event
 from spacenav_ws import wamp
 
@@ -102,13 +103,16 @@ class Controller:
   async def motion(self, event: event.MotionEvent, sess: 'MouseSession'):
     logging.info('Motion: %s', event)
     await sess.write('motion', True)
-    translation_mtx = np.eye(4)
-    # translation_mtx[3, :3] = np.array([event.x, event.y, event.z]) * 0.001
-    translation_mtx[:3, 3] = np.array([-event.x, event.y, event.z],
-                                      dtype=np.float32) * 0.001
-    self.camera.affine = self.camera.affine @ translation_mtx
-    logging.info('MTX: %s vs %s', self.camera.affine, translation_mtx)
-    logging.info('R: %s', self.camera.affine.ravel())
+    view_mtx = np.eye(4)
+    view_mtx[3, :3] = np.array([-event.x, -event.z, event.y],
+                               dtype=np.float32) * .001
+    angles = np.array([event.pitch, event.yaw, -event.roll],
+                      dtype=np.float32) * 0.005
+    rotation_mtx = transform.Rotation.from_euler('xyz', angles, degrees=True)
+    view_mtx[:3, :3] = rotation_mtx.as_matrix().reshape(3, 3)
+    # self.camera.affine = self.camera.affine @ view_mtx
+    self.camera.affine = view_mtx @ self.camera.affine
+    logging.debug('Affine matrix: %s', self.camera.affine.ravel())
 
     return await sess.write('view.affine',
                             self.camera.affine.T.ravel().tolist())
@@ -203,12 +207,11 @@ class MouseSession:
     for done_task in done:
       if done_task in self._mouse_reads:
         motion = done_task.result()
-        logging.info(f'Got mouse update: {motion}')
+        logging.debug(f'Got mouse update: {motion}')
         if self._controller:
           if isinstance(motion, event.MotionEvent):
             update_coroutine = self._controller.motion(motion, self)
             if update_coroutine:
-              logging.info('UCR: %s', update_coroutine)
               self._pending_handlers.append(
                   asyncio.create_task(update_coroutine, name='motion'))
         self._mouse_reads.remove(done_task)
@@ -216,7 +219,6 @@ class MouseSession:
         continue
       pending_call = done_task.result()
       if isinstance(pending_call, Coroutine):
-        logging.info('PC: %s', pending_call)
         self._pending_handlers.append(asyncio.create_task(pending_call,))
       if done_task in self._pending_handlers:
         self._pending_handlers.remove(done_task)
