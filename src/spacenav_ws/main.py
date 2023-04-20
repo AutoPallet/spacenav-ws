@@ -56,9 +56,10 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
   await mouse.shutdown()
 
 
+# TODO(blakely): This realily isn't the proper way to do this, but at least it
+# avoids the hang at the end waiting for the websocket to drop.
 @app.on_event("shutdown")
 def shutdown():
-  logging.info('SIG SHUTDOWN')
   global RUNNING
   RUNNING = False
   logging.info(f'   RUNNING: {RUNNING}')
@@ -66,7 +67,6 @@ def shutdown():
 
 @app.on_event("startup")
 def shutdown():
-  logging.info('SIG: STARTUP')
   global RUNNING
   RUNNING = True
   logging.info(f'    RUNNING: {RUNNING}')
