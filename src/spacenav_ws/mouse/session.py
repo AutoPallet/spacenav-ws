@@ -1,121 +1,22 @@
+"""Framework for linking the navigation controller to the WAMP events."""
+
 import asyncio
-import dataclasses
 import logging
-import struct
 from typing import Any, Coroutine
 
-import numpy as np
-from scipy.spatial import transform
 from spacenav_ws import event
 from spacenav_ws import wamp
+from spacenav_ws.mouse import controller
+from spacenav_ws.mouse import mouse3d
 
 
-def _rpc(name: str) -> str:
+def rpc_uri(name: str) -> str:
   return f'wss://127.51.68.120/3dconnexion#{name}'
 
 
-def _resource(*parts: list[str]) -> str:
+def resource_uri(*parts: list[str]) -> str:
   name = '/'.join(parts)
   return f'wss://127.51.68.120/3dconnexion{name}'
-
-
-class Mouse3d:
-
-  def __init__(self):
-    self.name = 'mouse0'
-
-
-class Controller:
-
-  @dataclasses.dataclass
-  class PredefinedViews:
-    front: np.ndarray
-
-  @dataclasses.dataclass
-  class World:
-    coordinate_frame: np.ndarray
-
-  @dataclasses.dataclass
-  class Camera:
-    affine: np.ndarray = dataclasses.field()
-    constructionPlane: np.ndarray
-    extents: np.ndarray
-    # fov: np.ndarray
-    frustum: np.ndarray
-    perspective: bool
-    target: np.ndarray
-    rotatable: np.ndarray
-
-    def __post_init__(self):
-      self.affine = np.asarray(self.affine).reshape([4, 4])
-
-  def __init__(self, mouse: Mouse3d, spnav_socket='/var/run/spnav.sock'):
-    self.name = 'controller0'
-    self.mouse = mouse
-    self.socket_path = spnav_socket
-    self._reader = None
-
-    self.affine = None
-    self.coordinate_system = None
-
-  async def connect(self):
-    self._reader, __ = await asyncio.open_unix_connection(self.socket_path)
-
-  @property
-  def uri(self) -> str:
-    return _resource(f'3dcontroller/{self.name}')
-
-  async def update(self):
-    mouse_event = await self._reader.read(32)
-    message = event.from_message(struct.unpack("iiiiiiii", mouse_event))
-    return message
-
-  async def reset(self, sess: 'MouseSession'):
-    await sess.write('hit.selectionOnly', False)
-
-    self.world = Controller.World(
-        np.array(await (sess.read('coordinateSystem'))))
-
-    self.predefined_views = Controller.PredefinedViews(
-        np.array(await (sess.read('views.front'))))
-
-    view_attribs = [
-        'affine',
-        'constructionPlane',
-        'extents',
-        # 'fov',
-        'frustum',
-        'perspective',
-        'target',
-        'rotatable',
-    ]
-
-    camera = {}
-    for attribute in view_attribs:
-      logging.info('Reading client view.%s', attribute)
-      result = await sess.read(f'view.{attribute}')
-      camera[attribute] = result
-    logging.info('Creating camera')
-    self.camera = Controller.Camera(**camera)
-
-    await sess.write('hit.selectionOnly', False)
-
-  async def motion(self, event: event.MotionEvent, sess: 'MouseSession'):
-    logging.info('Motion: %s', event)
-    await sess.write('motion', True)
-    view_mtx = np.eye(4)
-    view_mtx[3, :3] = np.array([-event.x, -event.z, event.y],
-                               dtype=np.float32) * .001
-    angles = np.array([event.pitch, event.yaw, -event.roll],
-                      dtype=np.float32) * 0.005
-    rotation_mtx = transform.Rotation.from_euler('xyz', angles, degrees=True)
-    view_mtx[:3, :3] = rotation_mtx.as_matrix().reshape(3, 3)
-    # self.camera.affine = self.camera.affine @ view_mtx
-    self.camera.affine = view_mtx @ self.camera.affine
-    logging.debug('Affine matrix: %s', self.camera.affine.ravel())
-
-    return await sess.write('view.affine',
-                            self.camera.affine.T.ravel().tolist())
 
 
 class MouseSession:
@@ -131,12 +32,16 @@ class MouseSession:
     self._mouse_reads = []
     self._pending_handlers = []
 
-    session.on(_rpc('create'), self.create)
-    session.on(_rpc('update'), self.client_update)
+    session.on(rpc_uri('create'), self.create)
+    session.on(rpc_uri('update'), self.client_update)
 
     self._com.on(wamp.WAMP_MSG_TYPE.SUBSCRIBE, self.subscription)
     self._com.on(wamp.WAMP_MSG_TYPE.CALLRESULT, self.rpc_finished)
     self._com.on(wamp.WAMP_MSG_TYPE.CALLERROR, self.rpc_error)
+
+  @property
+  def controller_uri(self) -> str:
+    return resource_uri(f'3dcontroller/{self._controller.name}')
 
   async def create(self, resource_uri: str, *args: list[Any]):
     resource_uri = self._com.resolve(resource_uri)
@@ -149,32 +54,31 @@ class MouseSession:
       return await self.create_controller(args[0], **args[1])
 
   def create_mouse(self, version: str) -> dict[str:str]:
-    self._mouse = Mouse3d()
+    self._mouse = mouse3d.Mouse3d()
     logging.info(f'"Creating" 3d mouse "{self._mouse.name}" '
                  f'for client verssion {version}')
     return {'connexion': self._mouse.name}
 
   async def create_controller(self, mouse_id: str, version: int,
                               name: str) -> dict[str:str]:
-    controller = Controller(self._mouse)
-    logging.info(f'Created controller "{controller.name}" '
+    # TODO(blakely): Reorganize this to break circular dependency.
+    ctrl = controller.Controller(self._mouse, self)
+    logging.info(f'Created controller "{ctrl.name}" '
                  f'for mouse "{mouse_id}", for client {name}, '
                  f'version {version}')
 
-    logging.info('Connected. Attempting to connect to mouse at '
-                 f'{controller.socket_path}...')
-    await controller.connect()
+    await ctrl.connect()
 
-    self._controller = controller
+    self._controller = ctrl
     self._expect_mouse()
     return {'instance': self._controller.name}
 
   async def subscription(self, resource_uri: str):
     logging.info(f'Registering subscription to: {resource_uri}')
-    await self._controller.reset(self)
+    await self._controller.reset()
 
   async def write_client(self, property: str, value: Any):
-    event = wamp.Event(self._controller.uri,
+    event = wamp.Event(self.controller_uri,
                        wamp.Call.new('self:update', '', property, value))
 
   def _expect_message(self, name):
@@ -202,6 +106,8 @@ class MouseSession:
                  f'{len(self._pending_handlers)})')
 
   async def process(self):
+    # TODO(blakely): Error handling. Currently they're pretty much just dropped
+    # on the ground... :/
     done, _ = await asyncio.wait(
         self.reads, timeout=1, return_when='FIRST_COMPLETED')
     for done_task in done:
@@ -210,7 +116,7 @@ class MouseSession:
         logging.debug(f'Got mouse update: {motion}')
         if self._controller:
           if isinstance(motion, event.MotionEvent):
-            update_coroutine = self._controller.motion(motion, self)
+            update_coroutine = self._controller.motion(motion)
             if update_coroutine:
               self._pending_handlers.append(
                   asyncio.create_task(update_coroutine, name='motion'))
@@ -262,7 +168,7 @@ class MouseSession:
     call = wamp.Call.new(method, '', *args)
     # Launch RPC in background as task.
     await self._com.send_event(
-        wamp.Event(self._controller.uri, call.serialize_with_id()))
+        wamp.Event(self.controller_uri, call.serialize_with_id()))
 
     gate = asyncio.Event()
     rpc = {

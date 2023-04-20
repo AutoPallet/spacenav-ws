@@ -1,3 +1,5 @@
+"""Basic WAMP V1 protocol."""
+
 import abc
 import dataclasses
 import enum
@@ -232,7 +234,8 @@ class WampSession:
     try:
       await handler(msg.call_id, *args)
     except TypeError:
-      # Caused when the response is not multiple args e.g. a bool
+      # Caused when the response is not multiple args e.g. a bool. Hooray for
+      # consistency in APIs! :C
       await handler(msg.call_id, args)
 
   async def callerror(self, msg: CallError):

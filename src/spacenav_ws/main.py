@@ -6,7 +6,7 @@ import pathlib
 import fastapi
 from fastapi import templating
 from fastapi.middleware import cors
-from spacenav_ws import maus
+from spacenav_ws.mouse import session
 from spacenav_ws import wamp
 import uvicorn
 
@@ -46,9 +46,9 @@ RUNNING = True
 @app.websocket("/3dconnexion")
 async def websocket_endpoint(websocket: fastapi.WebSocket):
   logging.info('Accepting 3dmosue connection')
-  session = wamp.WampSession(websocket)
+  wamp_session = wamp.WampSession(websocket)
 
-  mouse = maus.MouseSession(session)
+  mouse = session.MouseSession(wamp_session)
   await mouse.begin()
   while RUNNING:
     await mouse.process()
