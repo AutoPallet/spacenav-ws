@@ -16,6 +16,8 @@ Docker and Docker Compose
 
 You can import the nginx/certs/nginx-selfsigned.crt as a trusted cert or use your own - just replace the crt and key in nginx/certs.
 
+If you don't want to add the trusted cert, you can head to https://127.51.68.120:8181 and manually accept/bypass the self-signed cert. After completing this the websocket connections should work.
+
 ### Run
 
 ```
