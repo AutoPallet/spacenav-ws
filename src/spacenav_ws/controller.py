@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 from scipy.spatial import transform
 
-import spacenav_ws.spacenav
-import spacenav_ws.wamp
+from spacenav_ws.spacenav import MotionEvent, ButtonEvent, from_message
+from spacenav_ws.wamp import WampSession, Prefix, Call, Subscribe, CallResult
 
 
 class Mouse3d:
@@ -44,8 +44,9 @@ class Controller:
         def __post_init__(self):
             self.affine = np.asarray(self.affine).reshape([4, 4])
 
-    def __init__(self, reader: asyncio.StreamReader, mouse: Mouse3d, wamp_state_handler: spacenav_ws.wamp.WampSession):
+    def __init__(self, reader: asyncio.StreamReader, mouse: Mouse3d, wamp_state_handler: WampSession, client_metadata: dict):
         self.id = "controller0"
+        self.client_metadata = client_metadata
         self.reader = reader
         self._mouse = mouse
         self.wamp_state_handler = wamp_state_handler
@@ -57,9 +58,9 @@ class Controller:
         self.coordinate_system = None
         self.subscribed = False
 
-    async def subscribe(self):
+    async def subscribe(self, msg: Subscribe):
         """When a subscription request for self.controller_uri comes in we start broadcasting!"""
-        # await self.initialize()
+        logging.info("handling subscribe %s", msg)
         self.subscribed = True
 
     async def client_update(self, controller_id: str, args: dict[str, Any]):
@@ -82,20 +83,25 @@ class Controller:
         while True:
             mouse_event = await self.reader.read(32)
             nums = struct.unpack("iiiiiiii", mouse_event)
-            event = spacenav_ws.spacenav.from_message(list(nums))
-            if isinstance(event, spacenav_ws.spacenav.ButtonEvent):
+            event = from_message(list(nums))
+            if isinstance(event, ButtonEvent):
                 logging.warning("Button presses are discarded for now! %s", event)
-            elif isinstance(event, spacenav_ws.spacenav.MotionEvent):
+            elif isinstance(event, MotionEvent):
                 if self.subscribed:
-                    await self.send_mouse_event_to_client(event)
+                    if self.client_metadata["name"] == "Onshape":
+                        await self.update_onshape_client(event)
+                    elif self.client_metadata["name"] == "WebThreeJS Sample":
+                        await self.update_3dconnexion_client(event)
+                    else:
+                        logging.warning("Unknown client! Cannot send mouse events, client_metadata:%s", self.client_metadata)
 
-    async def send_mouse_event_to_client(self, event: spacenav_ws.spacenav.MotionEvent):
+    async def update_onshape_client(self, event: MotionEvent):
         # 1) pull down the current extents and model matrix
         extents = await self.remote_read("view.extents")
         flat = await self.remote_read("view.affine")
         curr_affine = np.asarray(flat, dtype=np.float32).reshape(4, 4)
 
-        # TODO: 
+        # TODO: This is not correct
         # 2) Handle rotation
         angles = np.array([event.pitch, event.yaw, -event.roll], dtype=np.float32) * 0.008
         rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
@@ -125,29 +131,59 @@ class Controller:
         await self.remote_write("view.affine", new_affine.reshape(-1).tolist())
         await self.remote_write("view.extents", new_extents)
 
+    async def update_3dconnexion_client(self, event: MotionEvent):
+        # 1) pull down the current extents and model matrix
+        flat = await self.remote_read("view.affine")
+        curr_affine = np.asarray(flat, dtype=np.float32).reshape(4, 4)
 
-async def create_mouse_controller(wamp_state_handler: spacenav_ws.wamp.WampSession, spacenav_reader: asyncio.StreamReader):
+        # 2) Handle rotation
+        # Rotate the model in the cameras perspective
+        # angles = np.array([event.pitch, event.yaw, -event.roll], dtype=np.float32) * 0.008
+        # rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+        # rot_delta = np.eye(4, dtype=np.float32)
+        # rot_delta[:3, :3] = rot_cam
+        # rotated = rot_delta @ curr_affine
+
+        # Rotate the model from _its_ perspective
+        angles = np.array([event.pitch, event.yaw, -event.roll], dtype=np.float32) * 0.008
+        rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+        rot_delta = np.eye(4, dtype=np.float32)
+        rot_delta[:3, :3] = rot_cam
+        rotated = curr_affine @ rot_delta
+
+        # 3) Handle translations
+        trans_delta = np.eye(4, dtype=np.float32)
+        # Probably event.y doesn't do anything at all here!
+        trans_delta[3, :3] = np.array([-event.x, -event.z, event.y], dtype=np.float32) * 0.001
+        new_affine = trans_delta @ rotated
+
+        # Write back changes
+        await self.remote_write("motion", True)
+        await self.remote_write("view.affine", new_affine.reshape(-1).tolist())
+
+
+async def create_mouse_controller(wamp_state_handler: WampSession, spacenav_reader: asyncio.StreamReader):
     await wamp_state_handler.wamp.begin()
     # The first three messages are typically prefix setters!
     msg = await wamp_state_handler.wamp.next_message()
-    while isinstance(msg, spacenav_ws.wamp.Prefix):
+    while isinstance(msg, Prefix):
         await wamp_state_handler.wamp.run_message_handler(msg)
         msg = await wamp_state_handler.wamp.next_message()
 
     # The first call after the prefixes must be 'create mouse'
-    assert isinstance(msg, spacenav_ws.wamp.Call)
+    assert isinstance(msg, Call)
     assert msg.proc_uri == "3dx_rpc:create" and msg.args[0] == "3dconnexion:3dmouse"
     mouse = Mouse3d()
     logging.info(f'Created 3d mouse "{mouse.id}" for version {msg.args[1]}')
-    await wamp_state_handler.wamp.send_message(spacenav_ws.wamp.CallResult(msg.call_id, {"connexion": mouse.id}))
+    await wamp_state_handler.wamp.send_message(CallResult(msg.call_id, {"connexion": mouse.id}))
 
     # And the second call after the prefixes must be 'create controller'
     msg = await wamp_state_handler.wamp.next_message()
-    assert isinstance(msg, spacenav_ws.wamp.Call)
+    assert isinstance(msg, Call)
     assert msg.proc_uri == "3dx_rpc:create" and msg.args[0] == "3dconnexion:3dcontroller" and msg.args[1] == mouse.id
     metadata = msg.args[2]
-    ctrl = Controller(spacenav_reader, mouse, wamp_state_handler)
+    ctrl = Controller(spacenav_reader, mouse, wamp_state_handler, metadata)
     logging.info(f'Created controller "{ctrl.id}" for mouse "{mouse.id}", for client "{metadata["name"]}", version "{metadata["version"]}"')
 
-    await wamp_state_handler.wamp.send_message(spacenav_ws.wamp.CallResult(msg.call_id, {"instance": ctrl.id}))
+    await wamp_state_handler.wamp.send_message(CallResult(msg.call_id, {"instance": ctrl.id}))
     return ctrl

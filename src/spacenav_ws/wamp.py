@@ -5,7 +5,8 @@ import logging
 import random
 import string
 from enum import IntEnum
-from typing import Any, ClassVar, Dict, NamedTuple, Optional, Type
+from types import CoroutineType
+from typing import Any, ClassVar, Dict, NamedTuple, Optional, Type, Callable
 
 from fastapi import WebSocket
 
@@ -102,8 +103,8 @@ class WampProtocol:
         self._session_id = _rand_id(16)
 
         self.prefixes = {}
-        self.call_handlers = {}
-        self.subscribe_handlers = {}
+        self.call_handlers: dict[str, Callable[..., CoroutineType[Any, Any, None]]] = {}
+        self.subscribe_handlers: dict[str, Callable[[Subscribe], CoroutineType[Any, Any, None]]] = {}
 
     async def begin(self):
         await self._socket.accept(subprotocol="wamp")
@@ -148,7 +149,7 @@ class WampProtocol:
             logging.warning("Unknown subscribable: %s", topic)
         else:
             logging.debug(f"handle subscribe to '{topic}' by calling: {handler}")
-            await handler()
+            await handler(msg)
 
     async def handle_callresult(self, msg: CallResult):
         logging.warning("No callresult handler for msg: %s", msg)

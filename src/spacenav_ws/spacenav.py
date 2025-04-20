@@ -17,9 +17,9 @@ def get_sync_spacenav_socket():
 async def get_async_spacenav_socket_reader() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     try:
         return await asyncio.open_unix_connection(SPACENAV_SOCKET_PATH)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ConnectionRefusedError):
         logging.exception("Space mouse not found!")
-        raise RuntimeError from e
+        exit(1)
 
 
 @dataclass

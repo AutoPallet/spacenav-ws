@@ -103,7 +103,7 @@ async def read_mouse_stream():
     logging.info("Start moving your mouse!")
     async for event in get_mouse_event_generator():
         logging.info(event.strip())
-
+    
 
 @cli.command()
 def read_mouse():
