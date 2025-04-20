@@ -1,18 +1,20 @@
 import asyncio
 import logging
-import os
-import pathlib
+import struct
+from pathlib import Path
 
-import fastapi
-from fastapi import templating
-from fastapi.middleware import cors
-from spacenav_ws.mouse import session
-from spacenav_ws import wamp
+import typer
 import uvicorn
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, HTMLResponse
+from rich.logging import RichHandler
 
-logging.basicConfig(level=logging.INFO)
+from spacenav_ws.controller import create_mouse_controller
+from spacenav_ws.spacenav import from_message, get_async_spacenav_socket_reader
+from spacenav_ws.wamp import WampProtocol, WampSession
 
-BASE_DIR = pathlib.Path(__file__).resolve().parent
+logging.basicConfig(level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 ORIGINS = [
     "https://127.51.68.120",
@@ -21,62 +23,93 @@ ORIGINS = [
     "https://cad.onshape.com",
 ]
 
-app = fastapi.FastAPI()
-templates = templating.Jinja2Templates(
-    directory=os.path.join(BASE_DIR, "templates"))
+CERT_FILE = Path(__file__).parent / "certs" / "ip.crt"
+KEY_FILE = Path(__file__).parent / "certs" / "ip.key"
 
-app.add_middleware(
-    cors.CORSMiddleware,
-    allow_origins=ORIGINS,
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
+cli = typer.Typer()
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "OPTIONS"], allow_headers=["*"])
 
 
-@app.route("/3dconnexion/nlproxy")
-async def nlproxy(request):
-  return fastapi.responses.JSONResponse({"port": "8181"})
+@app.get("/3dconnexion/nlproxy")
+async def get_info():
+    """
+    HTTP info endpoint for the 3Dconnexion client.
+    Returns which port the WAMP bridge will use and its version.
+    """
+    return {"port": 8181, "version": "1.4.8.21486"}
 
 
-RUNNING = True
+async def get_mouse_event_generator():
+    reader, _ = await get_async_spacenav_socket_reader()
+    while True:
+        mouse_event = await reader.readexactly(32)
+        nums = struct.unpack("iiiiiiii", mouse_event)
+        event_data = from_message(list(nums))
+        yield f"data: {event_data}\n\n"  # <- SSE format
+
+
+@app.get("/")
+def homepage():
+    html = """
+    <html>
+        <body>
+            <h1>Mouse Stream</h1>
+            <p>Move your spacemouse and the output should appear here!</p>
+            <pre id="output"></pre>
+            <script>
+                const evtSource = new EventSource("/events");
+                const maxLines = 30;
+                const lines = [];
+
+                evtSource.onmessage = function(event) {
+                    lines.push(event.data);
+                    if (lines.length > maxLines) {
+                        lines.shift();  // remove oldest
+                    }
+                    document.getElementById("output").textContent = lines.join("\\n");
+                };
+            </script>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html, status_code=200)
+
+
+@app.get("/events")
+async def event_stream():
+    return StreamingResponse(get_mouse_event_generator(), media_type="text/event-stream")
 
 
 @app.websocket("/")
-@app.websocket("/3dconnexion")
-async def websocket_endpoint(websocket: fastapi.WebSocket):
-  logging.info('Accepting 3dmosue connection')
-  wamp_session = wamp.WampSession(websocket)
-
-  mouse = session.MouseSession(wamp_session)
-  await mouse.begin()
-  while RUNNING:
-    await mouse.process()
-
-  await mouse.shutdown()
+async def nlproxy(ws: WebSocket):
+    wamp = WampProtocol(ws)
+    wamp_session = WampSession(wamp)
+    spacenav_reader, _ = await get_async_spacenav_socket_reader()
+    ctrl = await create_mouse_controller(wamp_session, spacenav_reader)
+    # TODO, better error handling then just dropping the websocket disconnect on the floor?
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(ctrl.start_mouse_event_stream(), name="mouse")
+        tg.create_task(ctrl.wamp_state_handler.start_wamp_message_stream(), name="wamp")
 
 
-# TODO(blakely): This realily isn't the proper way to do this, but at least it
-# avoids the hang at the end waiting for the websocket to drop.
-@app.on_event("shutdown")
-def shutdown():
-  global RUNNING
-  RUNNING = False
-  logging.info(f'   RUNNING: {RUNNING}')
+@cli.command()
+def serve(host: str = "127.51.68.120", port: int = 8181):
+    logging.warning(f"Navigate to: https://{host}:{port} You should be prompted to add the cert as an exception to your browser!")
+    uvicorn.run("spacenav_ws.main:app", host=host, port=port, ws="auto", ssl_certfile=CERT_FILE, ssl_keyfile=KEY_FILE, log_level="info")
 
 
-@app.on_event("startup")
-def shutdown():
-  global RUNNING
-  RUNNING = True
-  logging.info(f'    RUNNING: {RUNNING}')
+async def read_mouse_stream():
+    logging.info("Start moving your mouse!")
+    async for event in get_mouse_event_generator():
+        logging.info(event.strip())
+
+
+@cli.command()
+def read_mouse():
+    """This echos the output from the spacenav socket, usefull for checking if things are working under the hood"""
+    asyncio.run(read_mouse_stream())
 
 
 if __name__ == "__main__":
-  uvicorn.run(
-      "spacenav_ws.main:app",
-      host="0.0.0.0",
-      port=8000,
-      reload=True,
-      log_level="debug",
-  )
+    cli()
