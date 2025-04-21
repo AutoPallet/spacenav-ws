@@ -1,18 +1,55 @@
-# Websockets exposer for the spacenav driver
+# Websockets exposer for the spacenav driver (spacenav‑ws)
 
-This is a Python cli to make Onshape work with [FreeSpacenav/spacenavd](https://github.com/FreeSpacenav/spacenavd) on Linux. Installing spacenavd is a prerequisite for this program to work but otherwise it is self contained. Pull requests and ideas for improvement are very welcome! As is any and all good documentation on what 3dconnexion and Onshape are doing under the hood. This is basically reverse engineered from looking at some websocket traffic and I'm sure with more knowledge much can be improved!
+![PyPI version](https://img.shields.io/pypi/v/spacenav-ws)
+![Build Status](https://github.com/rmstorm/spacenav-ws/workflows/test.yaml/badge.svg)
+![License](https://img.shields.io/github/license/rmstorm/spacenav-ws)
 
-# Running it
+## Table of Contents
 
-You must have the spacenavdriver installed and running and then simply running: `uvx spacenav-ws` should get you up and running! Sadly there are several more snags to _really_ get underway.
- 1) The first is to check if the spacemousedriver is up and running and if you can connect to it: Run `uvx spacenav-ws@latest read-mouse` to check that!
- 2) The second is that this server must run with tls but obviously no-one will issue a cert for "127.51.68.120". Because of that I've self issued a cert which your browser will not trust by default. Start the server using: `uvx spacenav-ws@latest serve` and navigate to `https://127.51.68.120:8181`. Your browser should prompt you to add an exception and so trust the cert! Do so and the same mouse motions should appear on screen in your browser.
- 3) Onshape does currently not even look for the mouse websocket on Linux. To do this you must trick Onshape into thinking you are on a Windows system. For this Onshape helpfully check [this deprecated property](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/platform). I have not found any slick way to set this flag using a simple bookmark or something so you must install an extension like [Tampermonkey](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search) or something similar in your browser.. Something that allows executing JS before a pageload properly completes. If you install Tampermonkey this link should be a oneclick install to get up and running! https://greasyfork.org/en/scripts/533516-onshape-3d-mouse-on-linux-in-page-patch I hope to convince Onshape to start checking for the websocket on Linux now that this project is working well and thus remove this step..
+- [About](#about)  
+- [Prerequisites](#prerequisites)  
+- [Usage](#usage)  
+- [Development](#development)  
 
-# Developing
-Download the repo and run: `uv run spacenav-ws serve --hot-reload` this starts the server with Uvicorn's `code watcing / hot reload` feature enabled.
+## About
 
-# Deploying to pypi
+**spacenav‑ws** is a tiny Python CLI that exposes your 3Dconnexion SpaceMouse over a secure WebSocket, so Onshape on Linux can finally consume it. Under the hood it reverse‑engineers the same traffic Onshape’s Windows client uses and proxies it into your browser.
+
+This lets you use [FreeSpacenav/spacenavd](https://github.com/FreeSpacenav/spacenavd) on Linux with Onshape.
+
+## Prerequisites
+
+- [uv/uvx](https://docs.astral.sh/uv/getting-started/installation/) or another Python env manager.
+- A running instance of [spacenavd](https://github.com/FreeSpacenav/spacenavd)  
+- A modern browser (Chrome/Firefox) with a userscript manager (Tampermonkey/Greasemonkey)  
+
+## Usage
+
+1. **Validate spacenavd**
+```bash
+uvx spacenav-ws@latest read-mouse
+# → should print spacemouse events
+```
+
+2. **Run the server and trust the cert**
+```bash
+uvx spacenav-ws@latest serve
+```
+Now open: [https://127.51.68.120:8181](https://127.51.68.120:8181) Add a browser exception for the self‑signed cert.
+
+3. **Install Tampermonkey and add the userscript**
+
+Install [Tampermonkey](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search). After installing, click this [link](https://greasyfork.org/en/scripts/533516-onshape-3d-mouse-on-linux-in-page-patch) for one‑click install of the script.
+
+## Developing
+```bash
+git clone https://github.com/you/spacenav-ws.git
+cd spacenav-ws
+uv run spacenav-ws serve --hot-reload
+```
+This starts the server with Uvicorn's `code watching / hot reload` feature enabled.
+
+## Deploying to pypi
 Just run
 
 ```bash

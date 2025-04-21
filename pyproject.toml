@@ -1,6 +1,6 @@
 [project]
 name = "spacenav-ws"
-version = "0.1.3"
+version = "0.1.4"
 description = "SpaceNav WebSocket Bridge for using a 3dConnexion spacemouse with onshape"
 readme = "README.md"
 authors = [
@@ -13,6 +13,11 @@ dependencies = [
     "scipy>=1.15.2",
     "typer>=0.15.2",
     "uvicorn[standard]>=0.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
 ]
 
 [project.scripts]
