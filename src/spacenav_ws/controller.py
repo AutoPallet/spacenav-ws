@@ -1,5 +1,4 @@
 import asyncio
-import dataclasses
 import logging
 import struct
 from typing import Any
@@ -20,29 +19,6 @@ class Mouse3d:
 
 class Controller:
     """This one keeps track of the shared state between the client and the router! Or it should in any case.. It actually just completely ignores all client state except for a one time read out.. That should prolly be remedied"""
-
-    @dataclasses.dataclass
-    class PredefinedViews:
-        front: np.ndarray
-
-    @dataclasses.dataclass
-    class World:
-        coordinate_frame: np.ndarray
-
-    @dataclasses.dataclass
-    class Camera:
-        affine: np.ndarray = dataclasses.field()
-        constructionPlane: np.ndarray
-        extents: np.ndarray
-        # Apparently causes the 3dconnexion demo app to crash...?
-        # fov: np.ndarray
-        frustum: np.ndarray
-        perspective: bool
-        target: np.ndarray
-        rotatable: np.ndarray
-
-        def __post_init__(self):
-            self.affine = np.asarray(self.affine).reshape([4, 4])
 
     def __init__(self, reader: asyncio.StreamReader, mouse: Mouse3d, wamp_state_handler: WampSession, client_metadata: dict):
         self.id = "controller0"
@@ -88,77 +64,44 @@ class Controller:
                 logging.warning("Button presses are discarded for now! %s", event)
             elif isinstance(event, MotionEvent):
                 if self.subscribed:
-                    if self.client_metadata["name"] == "Onshape":
-                        await self.update_onshape_client(event)
-                    elif self.client_metadata["name"] == "WebThreeJS Sample":
-                        await self.update_3dconnexion_client(event)
+                    if self.client_metadata["name"] in ["Onshape", "WebThreeJS Sample"]:
+                        await self.update_client(event)
                     else:
                         logging.warning("Unknown client! Cannot send mouse events, client_metadata:%s", self.client_metadata)
 
-    async def update_onshape_client(self, event: MotionEvent):
+    async def update_client(self, event: MotionEvent):
         # 1) pull down the current extents and model matrix
-        extents = await self.remote_read("view.extents")
+        perspective = await self.remote_read("view.perspective")
         flat = await self.remote_read("view.affine")
         curr_affine = np.asarray(flat, dtype=np.float32).reshape(4, 4)
 
-        # TODO: This is not correct
-        # 2) Handle rotation
-        angles = np.array([event.pitch, event.yaw, -event.roll], dtype=np.float32) * 0.008
-        rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
-        rot_delta = np.eye(4, dtype=np.float32)
-        rot_delta[:3, :3] = rot_cam
-        rotated = rot_delta @ curr_affine
-        # Rotate the model from _its_ perspective
-        # angles = np.array([event.pitch, event.roll, event.yaw], dtype=np.float32) * 0.008
-        # rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
-        # rot_delta = np.eye(4, dtype=np.float32)
-        # rot_delta[:3, :3] = rot_cam
-        # rotated = curr_affine @ rot_delta
+        # This is the correct way to get the rotation matrix of the camera but it is unstable.. Either of the below methods works fine though.
+        R_cam = curr_affine[:3, :3].T
+        # cam2world = np.linalg.inv(curr_affine)
+        # R_cam = cam2world[:3, :3]
+        U, _, Vt = np.linalg.svd(R_cam)
+        R_cam = U @ Vt
 
-        # 3) Handle translations
+        angles = np.array([event.pitch, event.yaw, -event.roll]) * 0.008
+        R_delta_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+        R_world = R_cam @ R_delta_cam @ R_cam.T
+        rot_delta = np.eye(4, dtype=np.float32)
+        rot_delta[:3, :3] = R_world
+        new_affine = curr_affine @ rot_delta
         trans_delta = np.eye(4, dtype=np.float32)
-        # Probably event.y doesn't do anything at all here!
         trans_delta[3, :3] = np.array([-event.x, -event.z, event.y], dtype=np.float32) * 0.0005
-        new_affine = trans_delta @ rotated
-
-        # why is zooming implemnted like this?!?
-        zoom_delta = event.y * 0.0002
-        scale = 1.0 + zoom_delta
-        new_extents = [c * scale for c in extents]
+        new_affine = trans_delta @ curr_affine @ rot_delta
 
         # Write back changes
-        await self.remote_write("motion", True)
-        await self.remote_write("view.affine", new_affine.reshape(-1).tolist())
-        await self.remote_write("view.extents", new_extents)
-
-    async def update_3dconnexion_client(self, event: MotionEvent):
-        # 1) pull down the current extents and model matrix
-        flat = await self.remote_read("view.affine")
-        curr_affine = np.asarray(flat, dtype=np.float32).reshape(4, 4)
-
-        # 2) Handle rotation
-        # Rotate the model in the cameras perspective
-        # angles = np.array([event.pitch, event.yaw, -event.roll], dtype=np.float32) * 0.008
-        # rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
-        # rot_delta = np.eye(4, dtype=np.float32)
-        # rot_delta[:3, :3] = rot_cam
-        # rotated = rot_delta @ curr_affine
-
-        # Rotate the model from _its_ perspective
-        angles = np.array([event.pitch, event.yaw, -event.roll], dtype=np.float32) * 0.008
-        rot_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
-        rot_delta = np.eye(4, dtype=np.float32)
-        rot_delta[:3, :3] = rot_cam
-        rotated = curr_affine @ rot_delta
-
-        # 3) Handle translations
-        trans_delta = np.eye(4, dtype=np.float32)
-        # Probably event.y doesn't do anything at all here!
-        trans_delta[3, :3] = np.array([-event.x, -event.z, event.y], dtype=np.float32) * 0.001
-        new_affine = trans_delta @ rotated
-
-        # Write back changes
-        await self.remote_write("motion", True)
+        if not perspective:
+            extents = await self.remote_read("view.extents")
+            zoom_delta = event.y * 0.0002
+            scale = 1.0 + zoom_delta
+            new_extents = [c * scale for c in extents]
+            await self.remote_write("motion", True)
+            await self.remote_write("view.extents", new_extents)
+        else:
+            await self.remote_write("motion", True)
         await self.remote_write("view.affine", new_affine.reshape(-1).tolist())
 
 

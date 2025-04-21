@@ -166,9 +166,10 @@ class WampProtocol:
 class WampSession:
     """I'm honestly not even sure I should be keeping track of those rpcs? Maybe this whole stateHandler on top the WampProtocol is useless?"""
 
-    def __init__(self, wamp: WampProtocol):
-        self.wamp = wamp
-        self.in_flight_rpcs = {}
+    def __init__(self, websocket: WebSocket):
+        self.wamp = WampProtocol(websocket)
+
+        self.in_flight_rpcs: dict[str, dict] = {}
 
         self.wamp.handle_callresult = self.handle_callresult
         self.wamp.handle_callerror = self.handle_callerror
@@ -176,7 +177,7 @@ class WampSession:
     async def start_wamp_message_stream(self):
         while True:
             msg = await self.wamp.next_message()
-            # They're all like.. interleaved.. have to create one task per message with the current approach..
+            # They're all like.. interleaved.. have to create one task per message with the current approach.. Not very nice because it means errors don't bubble up
             asyncio.create_task(self.wamp.run_message_handler(msg))
 
     async def client_rpc(self, controller_uri: str, method: str, *args):
@@ -185,11 +186,10 @@ class WampSession:
         # Launch RPC in background as task. I guess? This is pretty unclear to me? Why are the calls wrapped in Events? Because of the Subscription?
         await self.wamp.send_message(Event(controller_uri, call.serialize_with_msg_id()))
 
-        gate = asyncio.Event()
-        rpc = {"gate": gate, "result": None, "error": None}
+        rpc = {"gate": asyncio.Event(), "result": None, "error": None}
 
         self.in_flight_rpcs[call.call_id] = rpc
-        await gate.wait()
+        await rpc["gate"].wait()
         del self.in_flight_rpcs[call.call_id]
 
         if rpc["error"] is not None:
