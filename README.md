@@ -35,24 +35,20 @@ uvx spacenav-ws@latest read-mouse
 ```bash
 uvx spacenav-ws@latest serve
 ```
-Now open: [https://127.51.68.120:8181](https://127.51.68.120:8181) Add a browser exception for the self‑signed cert.
+Now open: [https://127.51.68.120:8181](https://127.51.68.120:8181). When prompted, add a browser exception for the self‑signed cert.
 
 3. **Install Tampermonkey and add the userscript**
 
 Install [Tampermonkey](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search). After installing, click this [link](https://greasyfork.org/en/scripts/533516-onshape-3d-mouse-on-linux-in-page-patch) for one‑click install of the script.
 
+4. **Open an Onshape document and test your mouse!**
+
 ## Developing
+
 ```bash
 git clone https://github.com/you/spacenav-ws.git
 cd spacenav-ws
 uv run spacenav-ws serve --hot-reload
 ```
-This starts the server with Uvicorn's `code watching / hot reload` feature enabled.
 
-## Deploying to pypi
-Just run
-
-```bash
-uv build
-uv publish
-```
+This starts the server with Uvicorn's `code watching / hot reload` feature enabled. When making changes the server restarts and any websocket state is nuked, however, Onshape should immediately reconnect automatically! This makes for a very smooth and fast iteration workflow.

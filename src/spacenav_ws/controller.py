@@ -18,30 +18,62 @@ class Mouse3d:
 
 
 class Controller:
-    """This one keeps track of the shared state between the client and the router! Or it should in any case.. It actually just completely ignores all client state except for a one time read out.. That should prolly be remedied"""
+    """Manage shared state and event streaming between a local 3D mouse and a remote client.
 
-    def __init__(self, reader: asyncio.StreamReader, mouse: Mouse3d, wamp_state_handler: WampSession, client_metadata: dict):
+    This class subscribes clients over WAMP, tracks focus/subscription state,
+    reads raw 3D mouse data from an asyncio.StreamReader, and forwards
+    MotionEvent/ButtonEvent updates back to the client via RPC. It also
+    provides utility methods for affine‐pivot calculations and generic
+    remote_read/write operations.
+
+    Args:
+        reader (asyncio.StreamReader):
+            Asynchronous stream reader for receiving raw 3D mouse packets.
+        _ (Mouse3d):
+            Doesn't do anything.. things should be restructured so that it does probably.
+        wamp_state_handler (WampSession):
+            WAMP session handler that manages subscriptions and RPC calls.
+        client_metadata (dict):
+            Metadata about the connected client (e.g. its name and capabilities).
+
+    Attributes:
+        id (str):
+            Unique identifier for this controller instance (defaults to "controller0").
+        client_metadata (dict):
+            Same as the constructor arg: information about the client.
+        reader (asyncio.StreamReader):
+            Stream reader for incoming mouse event bytes.
+        wamp_state_handler (WampSession):
+            WAMP session object for subscribing and remote RPC.
+        subscribed (bool):
+            True once the client has subscribed to this controller’s URI.
+        focus (bool):
+            True when this controller is in focus and should send events.
+    """
+
+    def __init__(self, reader: asyncio.StreamReader, _: Mouse3d, wamp_state_handler: WampSession, client_metadata: dict):
         self.id = "controller0"
         self.client_metadata = client_metadata
         self.reader = reader
-        self._mouse = mouse
         self.wamp_state_handler = wamp_state_handler
 
         self.wamp_state_handler.wamp.subscribe_handlers[self.controller_uri] = self.subscribe
         self.wamp_state_handler.wamp.call_handlers["wss://127.51.68.120/3dconnexion#update"] = self.client_update
 
-        self.affine = None
-        self.coordinate_system = None
         self.subscribed = False
+        self.focus = False
 
     async def subscribe(self, msg: Subscribe):
         """When a subscription request for self.controller_uri comes in we start broadcasting!"""
         logging.info("handling subscribe %s", msg)
         self.subscribed = True
+        self.focus = True
 
     async def client_update(self, controller_id: str, args: dict[str, Any]):
-        # TODO start paying attention to at the very least focus events! But probably also other stuff
-        logging.debug(f"Got update for '{controller_id}': {args}, THESE ARE DROPPED FOR NOW!")
+        # TODO Maybe use some more of this data that the client sends our way?
+        logging.debug("Got update for '%s': %s, THESE ARE DROPPED FOR NOW!", controller_id, args)
+        if (focus := args.get("focus")) is not None:
+            self.focus = focus
 
     @property
     def controller_uri(self) -> str:
@@ -58,9 +90,9 @@ class Controller:
         logging.info("Starting the mouse stream")
         while True:
             mouse_event = await self.reader.read(32)
-            nums = struct.unpack("iiiiiiii", mouse_event)
-            event = from_message(list(nums))
-            if self.subscribed:
+            if self.focus and self.subscribed:
+                nums = struct.unpack("iiiiiiii", mouse_event)
+                event = from_message(list(nums))
                 if self.client_metadata["name"] in ["Onshape", "WebThreeJS Sample"]:
                     await self.update_client(event)
                 else:
@@ -103,9 +135,10 @@ class Controller:
         R_cam = U @ Vt
 
         # 2) Seperately calculate rotation and translation matrices
-        angles = np.array([event.pitch, event.yaw, -event.roll]) * 0.008
+        angles = np.array([event.pitch, event.yaw, -event.roll]) * 0.02
         R_delta_cam = transform.Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
         R_world = R_cam @ R_delta_cam @ R_cam.T
+
         rot_delta = np.eye(4, dtype=np.float32)
         rot_delta[:3, :3] = R_world
         trans_delta = np.eye(4, dtype=np.float32)
@@ -128,7 +161,11 @@ class Controller:
         await self.remote_write("view.affine", new_affine.reshape(-1).tolist())
 
 
-async def create_mouse_controller(wamp_state_handler: WampSession, spacenav_reader: asyncio.StreamReader):
+async def create_mouse_controller(wamp_state_handler: WampSession, spacenav_reader: asyncio.StreamReader) -> Controller:
+    """
+    This takes in an active websocket wrapped in a wampsession, it consumes the first couple of messages that form a sort of pseudo handshake..
+    When all is said is done it returns an active controller!
+    """
     await wamp_state_handler.wamp.begin()
     # The first three messages are typically prefix setters!
     msg = await wamp_state_handler.wamp.next_message()
@@ -139,7 +176,7 @@ async def create_mouse_controller(wamp_state_handler: WampSession, spacenav_read
     # The first call after the prefixes must be 'create mouse'
     assert isinstance(msg, Call)
     assert msg.proc_uri == "3dx_rpc:create" and msg.args[0] == "3dconnexion:3dmouse"
-    mouse = Mouse3d()
+    mouse = Mouse3d()  # There is really no point to this lol
     logging.info(f'Created 3d mouse "{mouse.id}" for version {msg.args[1]}')
     await wamp_state_handler.wamp.send_message(CallResult(msg.call_id, {"connexion": mouse.id}))
 
@@ -148,8 +185,8 @@ async def create_mouse_controller(wamp_state_handler: WampSession, spacenav_read
     assert isinstance(msg, Call)
     assert msg.proc_uri == "3dx_rpc:create" and msg.args[0] == "3dconnexion:3dcontroller" and msg.args[1] == mouse.id
     metadata = msg.args[2]
-    ctrl = Controller(spacenav_reader, mouse, wamp_state_handler, metadata)
-    logging.info(f'Created controller "{ctrl.id}" for mouse "{mouse.id}", for client "{metadata["name"]}", version "{metadata["version"]}"')
+    controller = Controller(spacenav_reader, mouse, wamp_state_handler, metadata)
+    logging.info(f'Created controller "{controller.id}" for mouse "{mouse.id}", for client "{metadata["name"]}", version "{metadata["version"]}"')
 
-    await wamp_state_handler.wamp.send_message(CallResult(msg.call_id, {"instance": ctrl.id}))
-    return ctrl
+    await wamp_state_handler.wamp.send_message(CallResult(msg.call_id, {"instance": controller.id}))
+    return controller

@@ -1,6 +1,6 @@
 [project]
 name = "spacenav-ws"
-version = "0.1.4"
+version = "0.1.5"
 description = "SpaceNav WebSocket Bridge for using a 3dConnexion spacemouse with onshape"
 readme = "README.md"
 authors = [{ name = "RmStorm", email = "roaldstorm@gmail.com" }]

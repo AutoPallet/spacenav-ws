@@ -14,6 +14,7 @@ from spacenav_ws.controller import create_mouse_controller
 from spacenav_ws.spacenav import from_message, get_async_spacenav_socket_reader
 from spacenav_ws.wamp import WampSession
 
+# TODO: This handler isn't used for the uvicorn logs and I can't be bothered finding the magic logging incantations to make it so.
 logging.basicConfig(level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 ORIGINS = [
@@ -33,10 +34,7 @@ app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", 
 
 @app.get("/3dconnexion/nlproxy")
 async def get_info():
-    """
-    HTTP info endpoint for the 3Dconnexion client.
-    Returns which port the WAMP bridge will use and its version.
-    """
+    """HTTP info endpoint for the 3Dconnexion client. Returns which port the WAMP bridge will use and its version."""
     return {"port": 8181, "version": "1.4.8.21486"}
 
 
