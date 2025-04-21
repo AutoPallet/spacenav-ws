@@ -1,7 +1,7 @@
 # Websockets exposer for the spacenav driver (spacenav‑ws)
 
 ![PyPI version](https://img.shields.io/pypi/v/spacenav-ws)
-![Build Status](https://github.com/rmstorm/spacenav-ws/workflows/test.yaml/badge.svg)
+![Build Status](https://github.com/rmstorm/spacenav-ws/workflows/Test/badge.svg)
 ![License](https://img.shields.io/github/license/rmstorm/spacenav-ws)
 
 ## Table of Contents

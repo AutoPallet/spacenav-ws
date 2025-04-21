@@ -3,9 +3,7 @@ name = "spacenav-ws"
 version = "0.1.4"
 description = "SpaceNav WebSocket Bridge for using a 3dConnexion spacemouse with onshape"
 readme = "README.md"
-authors = [
-    { name = "RmStorm", email = "roaldstorm@gmail.com" }
-]
+authors = [{ name = "RmStorm", email = "roaldstorm@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.12",
@@ -16,9 +14,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = [
-    "pytest>=8.3.5",
-]
+dev = ["pytest>=8.3.5"]
 
 [project.scripts]
 spacenav-ws = "spacenav_ws.main:cli"
