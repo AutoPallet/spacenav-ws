@@ -12,7 +12,7 @@ from rich.logging import RichHandler
 
 from spacenav_ws.controller import create_mouse_controller
 from spacenav_ws.spacenav import from_message, get_async_spacenav_socket_reader
-from spacenav_ws.wamp import WampProtocol, WampSession
+from spacenav_ws.wamp import WampSession
 
 logging.basicConfig(level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
