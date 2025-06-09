@@ -142,7 +142,7 @@ class Controller:
         rot_delta = np.eye(4, dtype=np.float32)
         rot_delta[:3, :3] = R_world
         trans_delta = np.eye(4, dtype=np.float32)
-        trans_delta[3, :3] = np.array([-event.x, -event.z, event.y], dtype=np.float32) * 0.0005
+        trans_delta[3, :3] = np.array([-event.x, -event.z, event.y], dtype=np.float32) * 0.0001
 
         # 3) Apply changes to the ModelViewProjection matrix
         pivot_pos, pivot_neg = self.get_affine_pivot_matrices(model_extents)
