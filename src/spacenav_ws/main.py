@@ -27,9 +27,19 @@ ORIGINS = [
 CERT_FILE = Path(__file__).parent / "certs" / "ip.crt"
 KEY_FILE = Path(__file__).parent / "certs" / "ip.key"
 
+class LocalhostMiddleware(CORSMiddleware):
+    """Extend the CORSMiddlware to also allow localhost requests.
+    
+    See https://developer.chrome.com/blog/private-network-access-preflight
+    https://github.com/encode/starlette/discussions/2509
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.preflight_headers['Access-Control-Allow-Private-Network'] = 'true'
+
 cli = typer.Typer()
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "OPTIONS"], allow_headers=["*"])
+app.add_middleware(LocalhostMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "OPTIONS"], allow_headers=["*"])
 
 
 @app.get("/3dconnexion/nlproxy")
