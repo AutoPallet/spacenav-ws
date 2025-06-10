@@ -33,6 +33,10 @@ class MotionEvent:
     period: int
     type: str = "mtn"
 
+    def is_stopped(self) -> bool:
+        """Returns True if all motion axes are zero."""
+        return not any((self.x, self.y, self.z, self.pitch, self.yaw, self.roll))
+
 
 @dataclass
 class ButtonEvent:

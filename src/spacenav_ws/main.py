@@ -27,15 +27,18 @@ ORIGINS = [
 CERT_FILE = Path(__file__).parent / "certs" / "ip.crt"
 KEY_FILE = Path(__file__).parent / "certs" / "ip.key"
 
+
 class LocalhostMiddleware(CORSMiddleware):
     """Extend the CORSMiddlware to also allow localhost requests.
-    
+
     See https://developer.chrome.com/blog/private-network-access-preflight
     https://github.com/encode/starlette/discussions/2509
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.preflight_headers['Access-Control-Allow-Private-Network'] = 'true'
+        self.preflight_headers["Access-Control-Allow-Private-Network"] = "true"
+
 
 cli = typer.Typer()
 app = FastAPI()
@@ -97,7 +100,8 @@ async def nlproxy(ws: WebSocket):
     ctrl = await create_mouse_controller(wamp_session, spacenav_reader)
     # TODO, better error handling then just dropping the websocket disconnect on the floor?
     async with asyncio.TaskGroup() as tg:
-        tg.create_task(ctrl.start_mouse_event_stream(), name="mouse")
+        tg.create_task(ctrl.read_mouse_events_loop(), name="mouse-reader")
+        tg.create_task(ctrl.send_updates_loop(), name="mouse-sender")
         tg.create_task(ctrl.wamp_state_handler.start_wamp_message_stream(), name="wamp")
 
 

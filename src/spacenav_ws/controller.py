@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import struct
+import time
 from typing import Any
 
 import numpy as np
@@ -46,9 +47,14 @@ class Controller:
         wamp_state_handler (WampSession):
             WAMP session object for subscribing and remote RPC.
         subscribed (bool):
-            True once the client has subscribed to this controller’s URI.
+            True once the client has subscribed to this controller's URI.
         focus (bool):
             True when this controller is in focus and should send events.
+        latest_motion_event: MotionEvent | None:
+            The latest motion event received from the mouse.
+        latest_motion_event_time: float:
+            The timestamp of the latest motion event received from the mouse.
+        next_send_time: float
     """
 
     def __init__(self, reader: asyncio.StreamReader, _: Mouse3d, wamp_state_handler: WampSession, client_metadata: dict):
@@ -62,6 +68,11 @@ class Controller:
 
         self.subscribed = False
         self.focus = False
+
+        # New state variables for two-loop system
+        self.latest_motion_event: MotionEvent | None = None
+        self.latest_motion_event_time: float = 0.0
+        self.next_send_time: float = 0.0
 
     async def subscribe(self, msg: Subscribe):
         """When a subscription request for self.controller_uri comes in we start broadcasting!"""
@@ -85,18 +96,77 @@ class Controller:
     async def remote_read(self, *args):
         return await self.wamp_state_handler.client_rpc(self.controller_uri, "self:read", *args)
 
-    async def start_mouse_event_stream(self):
-        """Right now we try to send every event to the client.. we should possibly maybe debounce?"""
-        logging.info("Starting the mouse stream")
+    async def handle_button_event(self, event: ButtonEvent):
+        """Resets the view on a button press."""
+        logging.info("Handling button event: %s", event)
+        model_extents = await self.remote_read("model.extents")
+        await self.remote_write("view.affine", await self.remote_read("views.front"))
+        await self.remote_write("view.extents", [c * 1.2 for c in model_extents])
+
+    async def read_mouse_events_loop(self):
+        """Reads events from the spacenav socket and signals the sender loop."""
+        logging.info("Starting to read mouse events.")
         while True:
-            mouse_event = await self.reader.read(32)
-            if self.focus and self.subscribed:
-                nums = struct.unpack("iiiiiiii", mouse_event)
+            try:
+                mouse_event_bytes = await self.reader.readexactly(32)
+                nums = struct.unpack("iiiiiiii", mouse_event_bytes)
                 event = from_message(list(nums))
-                if self.client_metadata["name"] in ["Onshape", "WebThreeJS Sample"]:
-                    await self.update_client(event)
-                else:
-                    logging.warning("Unknown client! Cannot send mouse events, client_metadata:%s", self.client_metadata)
+
+                if not (self.focus and self.subscribed and self.client_metadata["name"] in ["Onshape", "WebThreeJS Sample"]):
+                    continue
+
+                if isinstance(event, ButtonEvent):
+                    await self.handle_button_event(event)
+                elif isinstance(event, MotionEvent):
+                    self.latest_motion_event = event
+                    now = time.monotonic()
+                    self.latest_motion_event_time = now
+            except (asyncio.IncompleteReadError, ConnectionResetError) as e:
+                logging.warning("Connection to spacenavd lost: %s", e)
+                break
+            except Exception as e:
+                logging.error("Unexpected error in mouse reading loop: %s", e, exc_info=True)
+                break
+
+    async def send_updates_loop(self):
+        """Sends motion updates to the client at a consistent 60Hz while in motion."""
+        TARGET_RATE = 0.016
+        TARGET_DELAY = 0.002  # How long after the event should we ideally send? Should be larger than OS scheduler jitter.
+        ADJUST_KP = 0.1  # How much later should we send if we were too early?
+
+        logging.info("Starting to send updates to client.")
+        was_stopped = True
+        while True:
+            if self.next_send_time < time.monotonic():
+                # Something got desynchronized.
+                self.next_send_time = time.monotonic() + TARGET_RATE
+
+            await asyncio.sleep(self.next_send_time - time.monotonic())
+
+            self.next_send_time += TARGET_RATE
+            time_since_event = self.next_send_time - (self.latest_motion_event_time + TARGET_DELAY)
+            periods_since_event = round(time_since_event / TARGET_RATE)
+            ideal_send_time = self.latest_motion_event_time + periods_since_event * TARGET_RATE + TARGET_DELAY
+
+            error = ideal_send_time - self.next_send_time
+            self.next_send_time += error * ADJUST_KP
+
+            if self.latest_motion_event is None:
+                continue
+
+            # Stop sending updates if events from the mouse are extremely stale (e.g., spacenavd died)
+            if (time.monotonic() - self.latest_motion_event_time) > 2.0:
+                was_stopped = True
+                continue
+
+            is_stopped_now = self.latest_motion_event.is_stopped()
+
+            # Send an update if we are moving, or if we just stopped (to send the final zero-motion event).
+            if not (is_stopped_now and was_stopped):
+                if self.focus and self.subscribed:
+                    await self.update_client(self.latest_motion_event)
+
+            was_stopped = is_stopped_now
 
     @staticmethod
     def get_affine_pivot_matrices(model_extents):
@@ -110,18 +180,13 @@ class Controller:
         pivot_neg[3, :3] = -pivot
         return pivot_pos, pivot_neg
 
-    async def update_client(self, event: MotionEvent | ButtonEvent):
+    async def update_client(self, event: MotionEvent):
         """
         This send mouse events over to the client. Currently just a few properties are used but more are avaialable:
         view.target, view.constructionPlane, view.extents, view.affine, view.perspective, model.extents, selection.empty, selection.extents, hit.lookat, views.front
 
         """
         model_extents = await self.remote_read("model.extents")
-
-        if isinstance(event, ButtonEvent):
-            await self.remote_write("view.affine", await self.remote_read("views.front"))
-            await self.remote_write("view.extents", [c * 1.2 for c in model_extents])
-            return
 
         # 1) pull down the current extents and model matrix
         perspective = await self.remote_read("view.perspective")

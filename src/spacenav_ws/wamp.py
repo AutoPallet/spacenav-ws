@@ -5,8 +5,7 @@ import logging
 import random
 import string
 from enum import IntEnum
-from types import CoroutineType
-from typing import Any, ClassVar, Dict, NamedTuple, Optional, Type, Callable
+from typing import Any, ClassVar, Coroutine, Dict, NamedTuple, Optional, Type, Callable
 
 from fastapi import WebSocket
 
@@ -103,8 +102,8 @@ class WampProtocol:
         self._session_id = _rand_id(16)
 
         self.prefixes = {}
-        self.call_handlers: dict[str, Callable[..., CoroutineType[Any, Any, None]]] = {}
-        self.subscribe_handlers: dict[str, Callable[[Subscribe], CoroutineType[Any, Any, None]]] = {}
+        self.call_handlers: dict[str, Callable[..., Coroutine[Any, Any, None]]] = {}
+        self.subscribe_handlers: dict[str, Callable[[Subscribe], Coroutine[Any, Any, None]]] = {}
 
     async def begin(self):
         await self._socket.accept(subprotocol="wamp")
